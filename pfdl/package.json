@@ -1,0 +1,20 @@
+{
+  "name": "pfdl",
+  "module": "pfdl-cli.ts",
+  "type": "module",
+  "bin": {
+    "pfdl": "pfdl-cli.ts"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@types/lodash": "^4.14.202",
+    "commander": "^11.1.0",
+    "lodash": "^4.17.21",
+    "prettier": "^3.1.1"
+  }
+}
