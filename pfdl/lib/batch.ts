@@ -1,13 +1,24 @@
 import { isAbsolute } from "node:path";
 import { Root } from "./root";
+import { Dirent } from "fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { Artifact } from "./artifact";
+import { ErrorReport } from "./common-types";
 
-export type StructureReport = {
-    errorMessage?: string;
+export type BatchStructureData = {
+  state: "data";
+  artifacts: Artifact[];
+};
 
+export type BatchStructure = BatchStructureData | ErrorReport;
 
-}
+export type BatchArtifactsReport = {
+  state: "data";
+  entries: Dirent[];
+};
+
+export type BatchArtifacts = BatchArtifactsReport | ErrorReport;
 
 export class Batch {
   constructor(
@@ -32,30 +43,109 @@ export class Batch {
     return await readFile(this.batchPath(name));
   }
 
-  public async checkStructure() {
+  public async findArtifacts(): Promise<BatchArtifacts> {
     const entries = await readdir(this.batchPath(), { withFileTypes: true });
 
+    const entryNotPlains: string[] = [];
+
     for (const e of entries) {
-      if (!e.isFile)
-        throw new Error(`Batch entry ${e.name} is not a plain file object`);
+      if (!e.isFile()) entryNotPlains.push(e.name);
     }
 
-    let md5s: { [file: string]: string } | undefined = undefined;
+    if (entryNotPlains.length > 0)
+      return {
+        state: "error",
+        error: "Finding artifacts",
+        specific: entryNotPlains.map((e) => ({
+          message:
+            "Artifact is not a plain object (e.g. is a sub-directory or named pipe)",
+          root: this._root.root,
+          batch: this._batchName,
+          artifact: e,
+        })),
+      };
 
-    for (const e of entries)
-        if (e.name === "md5sums.txt")
-            md5s = this.md5SumsToObject((await this.loadContent(e.name)).toString("ascii"));
+    return {
+      state: "data",
+      entries: entries,
+    };
+  }
 
-    if (!md5s)
-        throw new Error("No md5sums.txt");
+  public async checkManifests(
+    artifacts: BatchArtifactsReport
+  ): Promise<BatchStructure> {
+    let manifestContent: { [file: string]: string } | undefined = undefined;
 
-    const names = new Set<string>(entries.map((e) => e.name));
+    for (const e of artifacts.entries)
+      if (e.name === "md5sums.txt")
+        manifestContent = this.md5SumsToObject(
+          (await this.loadContent(e.name)).toString("ascii")
+        );
 
-    for(const [md5name, md5sum] of Object.entries(md5s)) {
-        if (!names.has(md5name))
-            throw new Error(`Batch is missing files ${md5name} that was declared in the md5sums.txt`);
+    if (!manifestContent)
+      return {
+        state: "error",
+        error: "No manifest file (e.g. 'md5sums.txt') found in batch",
+        specific: [
+          {
+            message: "No manifest file (e.g. 'md5sums.txt') found in batch",
+            root: this._root.root,
+            batch: this._batchName,
+          },
+        ],
+      };
+
+    // a Set of all the names actually present on disk
+    const entryNames = new Set<string>(artifacts.entries.map((e) => e.name));
+
+    const missingArtifacts: string[] = [];
+    const extraArtifacts: string[] = [];
+
+    // loop through everything listed in the manifest to find anything missing
+    for (const [md5name, md5sum] of Object.entries(manifestContent)) {
+      if (!entryNames.has(md5name)) {
+        missingArtifacts.push(md5name);
+      } else {
+        entryNames.delete(md5name);
+      }
     }
 
+    // loop through everything in the artifacts to find anything extra
+    for (const e of entryNames) {
+      if (e !== "md5sums.txt")
+        extraArtifacts.push(e);
+    }
+
+    if (missingArtifacts.length > 0 || extraArtifacts.length > 0) {
+      return {
+        state: "error",
+        error: "Discrepency between manifest and content of batch",
+        specific: missingArtifacts
+          .map((e) => ({
+            message: "Artifact is listed in the manifest but not present",
+            root: this._root.root,
+            batch: this._batchName,
+            artifact: e,
+          }))
+          .concat(
+            extraArtifacts.map((e) => ({
+              message: "Artifact is present but not in the manifest",
+              root: this._root.root,
+              batch: this._batchName,
+              artifact: e,
+            }))
+          ),
+      };
+    }
+
+    return {
+      state: "data",
+      artifacts: Object.entries(manifestContent).map(([md5name, md5value]) => {
+        const a = new Artifact(this, md5name);
+        a.setChecksum("MD5", md5value);
+        return a;
+      }),
+    };
   }
 
   private md5SumsToObject(content: string) {
@@ -67,7 +157,11 @@ export class Batch {
     let sums: { [file: string]: string } = {};
 
     for (const line of content.split("\n")) {
-      if (line.startsWith("\\")) {
+      // skip possible blank last line
+      if (line.trim().length == 0)
+        continue;
+
+        if (line.startsWith("\\")) {
         // TODO we could support this but no need unless this is actually encountered (which is doubtful)
         // Without --zero, if file contains a backslash, newline,
         // or carriage return, the line is started with a backslash, and
@@ -86,6 +180,9 @@ export class Batch {
 
       // we ignore the type - should we?? (will be either space or *)
       const t = line.slice(33, 34);
+
+      if (file === "md5sums.txt")
+        continue;
 
       sums[file] = checksum;
     }

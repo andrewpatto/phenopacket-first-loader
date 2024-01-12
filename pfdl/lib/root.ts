@@ -6,9 +6,12 @@ export class Root {
   private _batches?: Batch[] = undefined;
 
   constructor(private absoluteRootFolder: string) {
+    // note: this is already checked before constructing Root
+    // objects so that proper error messages can be returned - so
+    // this is just a double-check (hence throwing an Error rather
+    // than returning an error data structure)
     if (!isAbsolute(absoluteRootFolder))
       throw new Error("Root folder must be absolute");
-
   }
 
   public get root(): string {
