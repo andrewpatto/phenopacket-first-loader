@@ -15,6 +15,7 @@
     "@types/lodash": "^4.14.202",
     "commander": "^11.1.0",
     "lodash": "^4.17.21",
-    "prettier": "^3.1.1"
+    "prettier": "^3.1.1",
+    "protobufjs": "7.2.6"
   }
 }

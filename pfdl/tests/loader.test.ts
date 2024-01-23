@@ -9,36 +9,46 @@ const examplesBadFolder = resolve("..", "examples-bad");
 test("basic end to end with single root", async () => {
   const l = new Loader([join(examplesFolder, "test1")]);
 
-  const b = await l.checkStructure();
+  const structure = await l.checkStructure();
 
-  expect(b.state).toBe("data");
+  expect(structure.state).toBe("data");
 
-  if (b.state !== "data") return;
+  if (structure.state !== "data") return;
 
-  // the keys are filenames sorted alphabetically
-  const batchNames = Array.from(b.artifacts.keys());
+  {
+    // the keys are filenames sorted alphabetically
+    const batchNames = Array.from(structure.artifacts.keys());
 
-  expect(batchNames).toBeArrayOfSize(18);
+    expect(batchNames).toBeArrayOfSize(18);
 
-  expect(batchNames[0]).toBe("A.consentpacket.json");
-  expect(batchNames[1]).toBe("A.phenopacket.json");
+    expect(batchNames[0]).toBe("A.consentpacket.json");
+    expect(batchNames[1]).toBe("A.phenopacket.json");
 
-  // expect the fastqs to be an array - with the latest batch appearing
-  // first (i.e batch 2020-02-06 has replaced the items in 2020-01-12)
-  expect(batchNames[11]).toBe("NEXTSEQ_ABCD_PERSONA_TOPUP_R2.fastq.gz");
-  const r2artifacts = b.artifacts.get(batchNames[11])!;
-  expect(r2artifacts).toBeArrayOfSize(2);
-  expect(r2artifacts[0].batch.name).toBe("2020-02-06");
-  expect(r2artifacts[0].getChecksum("MD5")).toBe(
-    "d41d8cd98f00b204e9800998ecf8427e"
-  );
-  expect(r2artifacts[1].batch.name).toBe("2020-01-12");
-  expect(r2artifacts[1].getChecksum("MD5")).toBe(
-    "9d5ed678fe57bcca610140957afab571"
-  );
+    // expect the fastqs to be an array - with the latest batch appearing
+    // first (i.e batch 2020-02-06 has replaced the items in 2020-01-12)
+    expect(batchNames[11]).toBe("NEXTSEQ_ABCD_PERSONA_TOPUP_R2.fastq.gz");
+    const r2artifacts = structure.artifacts.get(batchNames[11])!;
+    expect(r2artifacts).toBeArrayOfSize(2);
+    expect(r2artifacts[0].batch.name).toBe("2020-02-06");
+    expect(r2artifacts[0].getChecksum("MD5")).toBe(
+      "d41d8cd98f00b204e9800998ecf8427e"
+    );
+    expect(r2artifacts[1].batch.name).toBe("2020-01-12");
+    expect(r2artifacts[1].getChecksum("MD5")).toBe(
+      "9d5ed678fe57bcca610140957afab571"
+    );
 
-  expect(batchNames[17]).toBe("SIMPSONS.phenopacket.json");
-  expect(b.artifacts.get(batchNames[17])).toBeArrayOfSize(1);
+    expect(batchNames[17]).toBe("SIMPSONS.phenopacket.json");
+    expect(structure.artifacts.get(batchNames[17])).toBeArrayOfSize(1);
+  }
+
+  const r = await l.checkPhenopacketStructure(structure);
+
+  expect(r).toBeNull();
+
+  const f = await l.checkPhenopackets(structure);
+
+  console.log(JSON.stringify(f, null, 2));
 });
 
 test("loader root that is not an absolute path is rejected", async () => {
@@ -64,7 +74,7 @@ test("loader root that is not an absolute path is rejected", async () => {
   expect((b as ErrorReport).specific[1].root).toBe("b-path");
 });
 
-test("loader root that does not exist as a folder is rejected", async () => {
+test("loader root that does not exist is rejected", async () => {
   const l = new Loader([join(examplesBadFolder, "THIS-DOES not exist")]);
 
   const b = await l.checkStructure();
@@ -77,6 +87,23 @@ test("loader root that does not exist as a folder is rejected", async () => {
     "Root path not accessible"
   );
   expect((b as ErrorReport).specific[0].root).toEndWith("THIS-DOES not exist");
+});
+
+test("loader root that exists but is not a folder is rejected", async () => {
+  const l = new Loader([
+    join(examplesBadFolder, "missing-manifest", "batch", "A.bam"),
+  ]);
+
+  const b = await l.checkStructure();
+
+  expect(b.state).toBe("error");
+
+  expect((b as ErrorReport).specific).toBeArrayOfSize(1);
+
+  expect((b as ErrorReport).specific[0].message).toBe(
+    "Root path not accessible"
+  );
+  expect((b as ErrorReport).specific[0].root).toEndWith("A.bam");
 });
 
 test("batch with non-file artifacts is rejected", async () => {

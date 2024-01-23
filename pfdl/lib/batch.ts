@@ -140,11 +140,12 @@ export class Batch {
 
     return {
       state: "data",
-      artifacts: Object.entries(manifestContent).map(([md5name, md5value]) => {
-        const a = new Artifact(this, md5name);
+      artifacts: await Promise.all(Object.entries(manifestContent).map(async ([md5name, md5value]) => {
+        const a = await Artifact.CreateArtifact(this, md5name, this.batchPath(md5name));
         a.setChecksum("MD5", md5value);
+       
         return a;
-      }),
+      })),
     };
   }
 

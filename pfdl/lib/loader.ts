@@ -6,6 +6,9 @@ import { Root } from "./root";
 import { Artifact } from "./artifact";
 import { ErrorReport, ErrorSpecific } from "./common-types";
 import { BatchArtifacts, BatchStructureData } from "./batch";
+import { org } from "../phenopackets/phenopackets";
+import { isUndefined } from "lodash";
+import { Dataset, Family, Individual } from "./dataset-types";
 
 type LoaderStructureReport = {
   state: "data";
@@ -19,6 +22,14 @@ type LoaderStructureReport = {
 };
 
 export type LoaderStructure = ErrorReport | LoaderStructureReport;
+
+type LoaderDatasetReport = {
+  state: "data";
+
+  dataset: Dataset;
+};
+
+export type LoaderDataset = ErrorReport | LoaderDatasetReport;
 
 export class Loader {
   constructor(private _absoluteRootFolders: string[]) {}
@@ -58,8 +69,7 @@ export class Loader {
       }
     }
 
-    if (errors.length > 0)
-      return errors;
+    if (errors.length > 0) return errors;
 
     // the javascript Map stores keys in *insertion* order
     // so we want to insert these alphabetically
@@ -93,7 +103,7 @@ export class Loader {
         failedRootAbsolutes.push(r);
       } else {
         try {
-          await access(r);
+          await readdir(r);
         } catch (e) {
           failedRootAccesses.push(r);
         }
@@ -130,8 +140,8 @@ export class Loader {
       return {
         state: "error",
         error: "Artifacts",
-        specific: batches
-      }
+        specific: batches,
+      };
     }
 
     // now construct all the corresponding directory entries
@@ -207,4 +217,271 @@ export class Loader {
       deleted: new Set(),
     };
   }
+
+  /**
+   * Locates all the phenopackets in the data set and does basically
+   * structural checking on them.
+   * - all artifacts mentioned are present
+   * - all artifacts present are mentioned
+   * - basic checks
+   *
+   * @param structure
+   * @returns
+   */
+  public async checkPhenopacketStructure(
+    structure: LoaderStructureReport
+  ): Promise<ErrorReport | null> {
+    // if we find errors we want to return details
+    const errorEntries: ErrorSpecific[] = [];
+
+    // the "used" artifacts are either phenopackets themselves, or objects that
+    // have been mentioned by a phenopacket (or their accompanying index)
+    const usedArtifacts = new Set<string>();
+
+    for (const [name, historyOfArtifacts] of structure.artifacts) {
+      const artifact = historyOfArtifacts[0];
+
+      // an artifact can still be listed even after it is deleted... so we need
+      // to explicitly check in another special set
+      if (structure.deleted.has(name)) continue;
+
+      const packet = await artifact.getContentAsPhenopacket();
+
+      // we only want to process phenopackets themselves
+      if (!packet) continue;
+
+      // mark off the phenopacket as being "used"
+      usedArtifacts.add(name);
+
+      // we search the phenopackets for files and record them here for validity checking
+      const filesReferencedByPacket: org.phenopackets.schema.v2.core.IFile[] =
+        [];
+
+      // all the files in a single phenopacket add to our found list
+      const packetGatherFiles = (
+        p: org.phenopackets.schema.v2.IPhenopacket
+      ) => {
+        // gather the files
+        for (const f of p.files ?? []) filesReferencedByPacket.push(f);
+
+        for (const b of p.biosamples ?? []) {
+          for (const f of b.files ?? []) filesReferencedByPacket.push(f);
+        }
+      };
+
+      if (packet instanceof org.phenopackets.schema.v2.Phenopacket) {
+        packetGatherFiles(packet);
+
+        // standard phenopackets become a singleton case - that is a patient id of the patient and an empty case
+        if (!packet.subject)
+          throw new Error(
+            `Subject must be present in Phenopacket - content was ${JSON.stringify(
+              packet.toJSON()
+            )}`
+          );
+        if (!packet.subject.id)
+          throw new Error("Subject::id must be present in Phenopacket");
+      } else if (packet instanceof org.phenopackets.schema.v2.Family) {
+        // family phenopackets directly become a case of the whole family
+
+        if (!packet.id) {
+          errorEntries.push({
+            root: artifact.batch.root.root,
+            batch: artifact.batch.name,
+            artifact: artifact.name,
+            message: "Family phenopacket must have an id",
+          });
+        }
+
+        // the proband
+        if (packet.proband) {
+          packetGatherFiles(packet.proband);
+        }
+
+        // gather the family files
+        for (const f of packet.files ?? []) filesReferencedByPacket.push(f);
+
+        for (const p of packet.relatives ?? []) {
+          packetGatherFiles(p);
+        }
+      } else {
+        // mark an error entry as the phenopacket was somehow not something we otherwise recognise
+        errorEntries.push({
+          root: artifact.batch.root.root,
+          batch: artifact.batch.name,
+          artifact: artifact.name,
+          message:
+            "Phenopacket artifact was found but was not recognised as an individual or family phenopacket",
+        });
+
+        continue;
+      }
+
+      // now check the file entries for validity
+      for (const ff of filesReferencedByPacket) {
+        // file entries must have URIs or the whole thing won't work
+        if (!ff.uri) {
+          errorEntries.push({
+            root: artifact.batch.root.root,
+            batch: artifact.batch.name,
+            artifact: artifact.name,
+            message: "Phenopacket contained a file entry with no URI",
+          });
+        } else {
+          let fileName;
+          if (ff.uri.startsWith("file://")) {
+            fileName = ff.uri.slice(7);
+          }
+          if (ff.uri.startsWith("file:/")) {
+            fileName = ff.uri.slice(6);
+          }
+          // we only work with relative file references
+          if (!fileName) {
+            errorEntries.push({
+              root: artifact.batch.root.root,
+              batch: artifact.batch.name,
+              artifact: artifact.name,
+              message: `Phenopacket contained a file entry with non-relative URI ${ff.uri}`,
+            });
+          } else {
+            // every file reference must relate to an artifact in our dataset and which we will mark off
+            if (structure.artifacts.has(fileName)) {
+              usedArtifacts.add(fileName);
+
+              // TODO: do this better
+
+              // index artifacts exist but are not named in the phenopackets
+              // we mark them off here if they exist
+              if (structure.artifacts.has(fileName + ".bai"))
+                usedArtifacts.add(fileName + ".bai");
+              if (structure.artifacts.has(fileName + ".tbi"))
+                usedArtifacts.add(fileName + ".tbi");
+            } else {
+              if (structure.deleted.has(fileName)) {
+                errorEntries.push({
+                  root: artifact.batch.root.root,
+                  batch: artifact.batch.name,
+                  artifact: artifact.name,
+                  message: `Phenopacket contained a file entry '${ff.uri}' that is referencing a deleted artifact in the dataset`,
+                });
+              } else {
+                errorEntries.push({
+                  root: artifact.batch.root.root,
+                  batch: artifact.batch.name,
+                  artifact: artifact.name,
+                  message: `Phenopacket contained a file entry '${ff.uri}' that is referencing a non-existent artifact in the dataset`,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // now look to see if we have any dataset items that were not referenced (but we only do this if we don't otherwise have errors -
+    // because any above errors will cause spurious messages here)
+    if (errorEntries.length === 0) {
+      for (const [name, historyOfArtifacts] of structure.artifacts) {
+        const artifact = historyOfArtifacts[0];
+
+        // an artifact can still be listed even after it is deleted... so we need
+        // to explicitly check in another special set
+        if (structure.deleted.has(name)) continue;
+
+        if (!usedArtifacts.has(name)) {
+          errorEntries.push({
+            root: artifact.batch.root.root,
+            batch: artifact.batch.name,
+            artifact: artifact.name,
+            message: `Artifact was not referenced by any phenopacket`,
+          });
+        }
+      }
+    }
+
+    if (errorEntries.length > 0)
+      return {
+        state: "error",
+        error: "Phenopacket",
+        specific: errorEntries,
+      };
+
+    // returning null means everything checked out
+    return null;
+  }
+
+  public async checkPhenopackets(
+    structure: LoaderStructureReport
+  ): Promise<LoaderDataset> {
+    const families: Family[] = [];
+    const individuals: Individual[] = [];
+
+    const getArtifactFromFile = (f: org.phenopackets.schema.v2.core.IFile) => {
+      let fileName;
+      if (f.uri?.startsWith("file://")) {
+        fileName = f.uri.slice(7);
+      }
+      if (f.uri?.startsWith("file:/")) {
+        fileName = f.uri.slice(6);
+      }
+      return structure.artifacts.get(fileName!)![0];
+    };
+
+    for (const [name, historyOfArtifacts] of structure.artifacts) {
+      const a = historyOfArtifacts[0];
+
+      // an artifact can still be listed even after it is deleted... so we need
+      // to explicitly check in another special set
+      if (structure.deleted.has(name)) continue;
+
+      const packet = await a.getContentAsPhenopacket();
+
+      // we only want to process actual phenopackets
+      if (!packet) continue;
+
+      if (packet instanceof org.phenopackets.schema.v2.Phenopacket) {
+        const artifacts = packet.files.map((f) => getArtifactFromFile(f));
+        for (const b of packet.biosamples ?? []) {
+          for (const f of b.files ?? []) artifacts.push(getArtifactFromFile(f));
+        }
+
+        individuals.push({
+          externalIdentifiers: [{ system: "", value: packet.subject!.id! }],
+          biosamples: artifacts.map((a) => ({
+            externalIdentifiers: [],
+            artifacts: [a],
+          })),
+        });
+      }
+
+      if (packet instanceof org.phenopackets.schema.v2.Family) {
+        const everyone = [packet.proband!].concat(packet.relatives);
+
+        families.push({
+          externalIdentifiers: [{ system: "", value: packet.id }],
+          individuals: everyone.map((person) => ({
+            externalIdentifiers: [{ system: "", value: person.subject!.id! }],
+            biosamples: [],
+          })),
+        });
+      }
+    }
+
+    for (const i of individuals) {
+      families.push({
+        externalIdentifiers: [],
+        individuals: [i],
+      });
+    }
+
+    return {
+      state: "data",
+      dataset: {
+        externalIdentifiers: [],
+        families: families,
+      },
+    };
+  }
+
+  private createCase() {}
 }
