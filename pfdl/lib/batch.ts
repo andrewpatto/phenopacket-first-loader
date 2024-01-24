@@ -3,8 +3,8 @@ import { Root } from "./root";
 import { Dirent } from "fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { Artifact } from "./artifact";
-import { ErrorReport } from "./common-types";
+import {Artifact, FilesystemArtifact} from "./artifact";
+import {ErrorReport, ErrorSpecific} from "./common-types";
 
 export type BatchStructureData = {
   state: "data";
@@ -119,7 +119,7 @@ export class Batch {
     if (missingArtifacts.length > 0 || extraArtifacts.length > 0) {
       return {
         state: "error",
-        error: "Discrepency between manifest and content of batch",
+        error: "Discrepancy between manifest and content of batch",
         specific: missingArtifacts
           .map((e) => ({
             message: "Artifact is listed in the manifest but not present",
@@ -138,14 +138,53 @@ export class Batch {
       };
     }
 
+    // make artifacts which is the first point to load the files (this will be the first location
+    // for checksum errors and all sorts of other random filesystem/cloud/permission stuff)
+    const loadingErrors: ErrorSpecific[] = [];
+
+    const actualArtifacts: Artifact[] = [];
+
+    for (const [md5name, md5sum] of Object.entries(manifestContent)) {
+
+      try {
+        const a = await FilesystemArtifact.CreateFilesystemArtifact(this, md5name, this.batchPath(md5name));
+
+        try {
+          a.setChecksum("MD5", md5sum);
+        }
+        catch (checksumError: any) {
+          loadingErrors.push({
+            message: checksumError.message,
+            root: this._root.root,
+            batch: this._batchName,
+            artifact: md5name,
+          });
+        }
+
+        actualArtifacts.push(a);
+
+      }
+      catch (createError: any) {
+        loadingErrors.push({
+          message: createError.message,
+          root: this._root.root,
+          batch: this._batchName,
+          artifact: md5name,
+        });
+      }
+    }
+
+    if (loadingErrors.length > 0) {
+      return {
+        state: "error",
+        error: "Loading",
+        specific: loadingErrors
+      }
+    }
+
     return {
       state: "data",
-      artifacts: await Promise.all(Object.entries(manifestContent).map(async ([md5name, md5value]) => {
-        const a = await Artifact.CreateArtifact(this, md5name, this.batchPath(md5name));
-        a.setChecksum("MD5", md5value);
-       
-        return a;
-      })),
+      artifacts: actualArtifacts,
     };
   }
 

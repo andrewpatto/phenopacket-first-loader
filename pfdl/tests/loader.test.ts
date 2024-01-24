@@ -6,6 +6,30 @@ import { ErrorReport } from "../lib/common-types.ts";
 const examplesFolder = resolve("..", "examples");
 const examplesBadFolder = resolve("..", "examples-bad");
 
+// this is not really a unit test - it just helps out that if we are failing our
+// E2E test that we get printouts of the error messages
+test("basic end to end with printing of error messages if found", async () => {
+  const l = new Loader([join(examplesFolder, "test1")]);
+
+  const structure = await l.checkStructure();
+
+  if (structure.state !== "data") {
+    expect(structure.state).fail(JSON.stringify(structure, null, 2));
+  } else {
+    const r = await l.checkPhenopacketStructure(structure);
+
+    if (r) {
+      expect(r).fail(JSON.stringify(r, null, 2));
+    }
+
+    const f = await l.checkPhenopackets(structure);
+
+    if (f.state !== "data") {
+      expect(f.state).fail(JSON.stringify(f, null, 2));
+    }
+  }
+});
+
 test("basic end to end with single root", async () => {
   const l = new Loader([join(examplesFolder, "test1")]);
 

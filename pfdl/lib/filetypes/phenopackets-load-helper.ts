@@ -1,11 +1,11 @@
-import { org } from "../phenopackets/phenopackets";
+import { org } from "./phenopackets/phenopackets";
 import isEmpty from "lodash/isEmpty";
 
-// NOTE there is no particular marker in the phenopacket to say what type of packet it is
+// NOTE there is no particular marker in the phenopacket to say what type of packet it is,
 // so we need to do some sniffing of content
 
 // NOTE the decoded protobuf objects have arrays (albeit empty) - even where there was no data
-// present (i.e pp.subject will be [] even if the protobuf had no "subject")
+// present (i.e. pp.subject will be [] even if the protobuf had no "subject")
 // so we need to always be careful what sort of "is null" etc tests we are making -
 // so mainly we use lodash isEmpty and we look for where content *is* present
 

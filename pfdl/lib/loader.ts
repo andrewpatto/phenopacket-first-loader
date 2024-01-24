@@ -1,14 +1,17 @@
-import { isAbsolute, join } from "node:path";
-import { readdir, access } from "fs/promises";
-import { Dirent } from "fs";
-import { Batch, BatchArtifactsReport } from "./batch";
+import { isAbsolute } from "node:path";
+import { readdir } from "fs/promises";
+import { Batch, BatchArtifactsReport, BatchStructureData } from "./batch";
 import { Root } from "./root";
 import { Artifact } from "./artifact";
 import { ErrorReport, ErrorSpecific } from "./common-types";
-import { BatchArtifacts, BatchStructureData } from "./batch";
-import { org } from "../phenopackets/phenopackets";
-import { isUndefined } from "lodash";
-import { Dataset, Family, Individual } from "./dataset-types";
+import { org } from "./filetypes/phenopackets/phenopackets";
+import {
+  PfdlDataset,
+  PfdlFamily,
+  PfdlFile,
+  PfdlIndividual,
+  PfdlPhenopacket,
+} from "./dataset-types";
 
 type LoaderStructureReport = {
   state: "data";
@@ -26,7 +29,7 @@ export type LoaderStructure = ErrorReport | LoaderStructureReport;
 type LoaderDatasetReport = {
   state: "data";
 
-  dataset: Dataset;
+  dataset: PfdlDataset;
 };
 
 export type LoaderDataset = ErrorReport | LoaderDatasetReport;
@@ -41,7 +44,7 @@ export class Loader {
    * @returns
    */
   private async findBatchesInOrder(
-    roots: Root[]
+    roots: Root[],
   ): Promise<Map<string, Batch> | ErrorSpecific[]> {
     const allNamesUnordered = new Map<string, Batch>();
 
@@ -123,7 +126,7 @@ export class Loader {
             failedRootAccesses.map((e) => ({
               message: "Root path not accessible",
               root: e,
-            }))
+            })),
           )
           .toSorted((a, b) => a.root.localeCompare(b.root)),
       };
@@ -133,7 +136,7 @@ export class Loader {
     // we are going to process them in order so that "later" batches will be able override
     // artifacts in older batches
     const batches = await this.findBatchesInOrder(
-      this._absoluteRootFolders.map((arf) => new Root(arf))
+      this._absoluteRootFolders.map((arf) => new Root(arf)),
     );
 
     if (!(batches instanceof Map)) {
@@ -164,7 +167,7 @@ export class Loader {
         state: "error",
         error: "Artifacts",
         specific: errorEntries.toSorted((a, b) =>
-          a.message.localeCompare(b.message)
+          a.message.localeCompare(b.message),
         ),
       };
     }
@@ -212,7 +215,7 @@ export class Loader {
     return {
       state: "data",
       artifacts: new Map(
-        [...artifacts].sort((a, b) => a[0].localeCompare(b[0]))
+        [...artifacts].sort((a, b) => a[0].localeCompare(b[0])),
       ),
       deleted: new Set(),
     };
@@ -229,7 +232,7 @@ export class Loader {
    * @returns
    */
   public async checkPhenopacketStructure(
-    structure: LoaderStructureReport
+    structure: LoaderStructureReport,
   ): Promise<ErrorReport | null> {
     // if we find errors we want to return details
     const errorEntries: ErrorSpecific[] = [];
@@ -259,7 +262,7 @@ export class Loader {
 
       // all the files in a single phenopacket add to our found list
       const packetGatherFiles = (
-        p: org.phenopackets.schema.v2.IPhenopacket
+        p: org.phenopackets.schema.v2.IPhenopacket,
       ) => {
         // gather the files
         for (const f of p.files ?? []) filesReferencedByPacket.push(f);
@@ -276,21 +279,21 @@ export class Loader {
         if (!packet.subject)
           throw new Error(
             `Subject must be present in Phenopacket - content was ${JSON.stringify(
-              packet.toJSON()
-            )}`
+              packet.toJSON(),
+            )}`,
           );
         if (!packet.subject.id)
           throw new Error("Subject::id must be present in Phenopacket");
       } else if (packet instanceof org.phenopackets.schema.v2.Family) {
-        // family phenopackets directly become a case of the whole family
-
         if (!packet.id) {
           errorEntries.push({
             root: artifact.batch.root.root,
             batch: artifact.batch.name,
             artifact: artifact.name,
-            message: "Family phenopacket must have an id",
+            message:
+              "Family Phenopacket must have an id representing the identifier of the family as a group",
           });
+          continue;
         }
 
         // the proband
@@ -341,7 +344,7 @@ export class Loader {
               root: artifact.batch.root.root,
               batch: artifact.batch.name,
               artifact: artifact.name,
-              message: `Phenopacket contained a file entry with non-relative URI ${ff.uri}`,
+              message: `Phenopacket contained a file URI '${ff.uri}' that is an absolute URI`,
             });
           } else {
             // every file reference must relate to an artifact in our dataset and which we will mark off
@@ -362,7 +365,7 @@ export class Loader {
                   root: artifact.batch.root.root,
                   batch: artifact.batch.name,
                   artifact: artifact.name,
-                  message: `Phenopacket contained a file entry '${ff.uri}' that is referencing a deleted artifact in the dataset`,
+                  message: `Phenopacket contained a file entry '${ff.uri}' that is referencing a deleted artifact of the dataset`,
                 });
               } else {
                 errorEntries.push({
@@ -411,20 +414,81 @@ export class Loader {
   }
 
   public async checkPhenopackets(
-    structure: LoaderStructureReport
+    structure: LoaderStructureReport,
   ): Promise<LoaderDataset> {
-    const families: Family[] = [];
-    const individuals: Individual[] = [];
+    const families: PfdlFamily[] = [];
+    const individuals: PfdlIndividual[] = [];
 
-    const getArtifactFromFile = (f: org.phenopackets.schema.v2.core.IFile) => {
+    const inplaceConvertFile = (f: PfdlFile) => {
+      // the object we get passed in will be the original phenopacket IFile (even though the
+      // type says otherwise)
+      const origFile = f as unknown as org.phenopackets.schema.v2.core.IFile;
+
+      // the phenopacket Uri we are going to convert to a "name" - and then link in an "artifact"
       let fileName;
-      if (f.uri?.startsWith("file://")) {
-        fileName = f.uri.slice(7);
+      if (origFile.uri?.startsWith("file://")) {
+        fileName = origFile.uri.slice(7);
       }
-      if (f.uri?.startsWith("file:/")) {
-        fileName = f.uri.slice(6);
+      if (origFile.uri?.startsWith("file:/")) {
+        fileName = origFile.uri.slice(6);
       }
-      return structure.artifacts.get(fileName!)![0];
+      if (!fileName)
+        throw new Error(
+          `Unrecognised prefix in Phenopacket file URI '${origFile.uri}' - this error should have been captured earlier`,
+        );
+
+      delete origFile.uri;
+
+      f.name = fileName;
+      f.artifact = structure.artifacts.get(fileName!)![0];
+    };
+
+    const inplaceConvertPhenopacket = (p: PfdlPhenopacket) => {
+      // we are going to mutate all the file entries throughout the phenopacket to add in artifact links
+      for (const f of p.files ?? []) {
+        inplaceConvertFile(f);
+
+        // we need to go deep into the nested biosamples to fix all the files
+        for (const b of p.biosamples ?? []) {
+          for (const f of b.files ?? []) inplaceConvertFile(f);
+        }
+      }
+    };
+
+    const inplaceTakeOutConsents = async (
+      files: PfdlFile[] | null | undefined,
+    ): Promise<any | undefined> => {
+      if (!files) return undefined;
+
+      let foundConsent: any;
+      let i = files.length;
+      while (i--) {
+        const cp = await (files[i].artifact.getContentAsConsentpacket());
+        if (cp) {
+          // we don't want to have to try to come up with our own merging logic
+          if (foundConsent) {
+            throw new Error(
+                "Only one consentpacket can be applied at any level (family, individual, biosample)",
+            );
+          }
+
+          foundConsent = cp;
+
+          // because consent is brought into our data - we don't want it to appear as an artifact anymore
+          files.splice(i, 1);
+        }
+      }
+      return foundConsent;
+    };
+
+    const inplaceLoadConsent = async (p: PfdlPhenopacket) => {
+      // we each level if we discover a consent packet reference then we bring in that consent data
+      p.consent = await inplaceTakeOutConsents(p.files);
+
+      // look for special consent at the biosample level
+      for (const b of p.biosamples ?? []) {
+        b.consent = await inplaceTakeOutConsents(b.files);
+      }
     };
 
     for (const [name, historyOfArtifacts] of structure.artifacts) {
@@ -434,54 +498,49 @@ export class Loader {
       // to explicitly check in another special set
       if (structure.deleted.has(name)) continue;
 
-      const packet = await a.getContentAsPhenopacket();
+      const pp = await a.getContentAsPhenopacket();
 
       // we only want to process actual phenopackets
-      if (!packet) continue;
+      if (!pp) continue;
 
-      if (packet instanceof org.phenopackets.schema.v2.Phenopacket) {
-        const artifacts = packet.files.map((f) => getArtifactFromFile(f));
-        for (const b of packet.biosamples ?? []) {
-          for (const f of b.files ?? []) artifacts.push(getArtifactFromFile(f));
-        }
+      // NOTE: we will be making JSON copies of the phenopacket and then
+      // "in-place" mutating the objects to make them match our desired PFDL schema
 
-        individuals.push({
-          externalIdentifiers: [{ system: "", value: packet.subject!.id! }],
-          biosamples: artifacts.map((a) => ({
-            externalIdentifiers: [],
-            artifacts: [a],
-          })),
-        });
+      if (pp instanceof org.phenopackets.schema.v2.Phenopacket) {
+        const pfdl: PfdlPhenopacket = pp.toJSON();
+
+        inplaceConvertPhenopacket(pfdl);
+
+        await inplaceLoadConsent(pfdl);
+
+        individuals.push(pfdl);
       }
 
-      if (packet instanceof org.phenopackets.schema.v2.Family) {
-        const everyone = [packet.proband!].concat(packet.relatives);
+      if (pp instanceof org.phenopackets.schema.v2.Family) {
+        const pfdl: PfdlFamily = pp.toJSON();
 
-        families.push({
-          externalIdentifiers: [{ system: "", value: packet.id }],
-          individuals: everyone.map((person) => ({
-            externalIdentifiers: [{ system: "", value: person.subject!.id! }],
-            biosamples: [],
-          })),
-        });
+        // family can have its own collection of files
+        for (const f of pfdl.files ?? []) inplaceConvertFile(f);
+
+        // now all the individuals in the family, both proband and relatives
+        if (pfdl.proband) inplaceConvertPhenopacket(pfdl.proband);
+        for (const p of pfdl.relatives ?? []) inplaceConvertPhenopacket(p);
+
+        // find consents and import
+        pfdl.consent = await inplaceTakeOutConsents(pfdl.files);
+        if (pfdl.proband) await inplaceLoadConsent(pfdl.proband);
+        for (const p of pfdl.relatives ?? []) await inplaceLoadConsent(p);
+
+        families.push(pfdl);
       }
-    }
-
-    for (const i of individuals) {
-      families.push({
-        externalIdentifiers: [],
-        individuals: [i],
-      });
     }
 
     return {
       state: "data",
       dataset: {
-        externalIdentifiers: [],
+        individuals: individuals,
         families: families,
       },
     };
   }
-
-  private createCase() {}
 }
