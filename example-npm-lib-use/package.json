@@ -1,0 +1,19 @@
+{
+  "name": "example-npm-lib-use",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A simple example that should confirm the accompanying project NPM package works",
+  "scripts": {
+    "test-lib": "tsx ./example-npm-lib-use.mts",
+    "test-cli": "pfdl --roots ../examples/test1"
+  },
+  "author": "Andrew Patterson",
+  "license": "MIT",
+  "dependencies": {
+    "pfdl": "file:../pfdl"
+  },
+  "devDependencies": {
+    "@types/node": "18.15.3",
+    "tsx": "4.7.1"
+  }
+}
