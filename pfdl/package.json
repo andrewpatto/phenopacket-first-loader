@@ -35,7 +35,13 @@
       "jest-extended/all"
     ]
   },
+  "engines": {
+    "npm": "please-use-pnpm",
+    "yarn": "please-use-pnpm",
+    "pnpm": ">= 8.0.0"
+  },
   "scripts": {
+    "preinstall": "npx only-allow pnpm",
     "build": "tsup-node",
     "dev": "tsup-node --watch",
     "test": "jest"

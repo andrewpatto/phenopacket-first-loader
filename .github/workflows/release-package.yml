@@ -1,0 +1,38 @@
+name: Release Package
+
+on:
+  release:
+    types: [released]
+
+jobs:
+  publish-to-npm-registry:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+          run_install: false
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: pfdl
+
+      # first set the versions of our package to the release version (from github trigger)
+
+      - run: pnpm version ${{github.ref_name}}
+        working-directory: pfdl
+
+      # we can publish the package
+
+      - run: pnpm publish --access public --no-git-checks
+        working-directory: pfdl
+        env:
+          NODE_AUTH_TOKEN: ${{secrets.NPM_PUBLISH_TOKEN}}
