@@ -1,5 +1,6 @@
 {
-  "name": "pfdl",
+  "name": "@elsa-data/pfdl",
+  "version": "0.0.0",
   "type": "module",
   "files": [
     "dist",
@@ -11,6 +12,9 @@
       "import": "./dist/pfdl-lib.js"
     },
     "./package.json": "./package.json"
+  },
+  "bin": {
+    "pfdl": "./dist/pfdl-cli.js"
   },
   "tsup": {
     "entry": {
@@ -26,9 +30,6 @@
     "splitting": false,
     "sourcemap": true,
     "clean": true
-  },
-  "bin": {
-    "pfdl": "./dist/pfdl-cli.js"
   },
   "jest": {
     "setupFilesAfterEnv": [
