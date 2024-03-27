@@ -1,0 +1,13 @@
+{
+  "name": "phenopacket-first-dataset-loader-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The monorepo root for PFDL",
+  "scripts": {
+    "preinstall": "npx only-allow pnpm"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/elsa-data/phenopacket-first-dataset-loader.git"
+  }
+}
