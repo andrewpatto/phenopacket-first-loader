@@ -1,8 +1,8 @@
 import { stat, readFile } from "node:fs/promises";
 import { Batch } from "./batch";
 import { isAbsolute } from "node:path";
-import { resolveContentToConsentpacket } from "./filetypes/consentpacket-load-helper.ts";
-import { resolveContentToPhenopacket } from "./filetypes/phenopackets-load-helper.ts";
+import { resolveContentToConsentpacket } from "./filetypes/consentpacket-load-helper";
+import { resolveContentToPhenopacket } from "./filetypes/phenopackets-load-helper";
 import { createHash } from "node:crypto";
 
 export type ChecksumAlgorithms = "MD5" | "AWS-ETAG";

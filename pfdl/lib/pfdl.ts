@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { readdir } from "fs/promises";
+import { readdir } from "node:fs/promises";
 import { Batch, BatchArtifactsReport, BatchStructureData } from "./batch";
 import { Root } from "./root";
 import { Artifact } from "./artifact";
@@ -74,11 +74,17 @@ export class Loader {
 
     if (errors.length > 0) return errors;
 
-    // the javascript Map stores keys in *insertion* order
-    // so we want to insert these alphabetically
+    // the javascript Map iterates keys in *insertion* order - but we would like the
+    // iteration order to be meaningful to the clients
+
+    // so we want to insert these alphabetically as our ordering
+    // definition is alphabetically (i.e. batch "2010-01" needs to come before "2011-05")
     const map = new Map<string, Batch>();
 
-    for (const a of Array.from(allNamesUnordered.keys()).toSorted()) {
+    const batchNames = Array.from(allNamesUnordered.keys());
+    batchNames.sort();
+
+    for (const a of batchNames) {
       map.set(a, allNamesUnordered.get(a)!);
     }
 
@@ -113,23 +119,27 @@ export class Loader {
       }
     }
 
-    if (failedRootAbsolutes.length > 0 || failedRootAccesses.length > 0)
+    // we found an error - return them all
+    if (failedRootAbsolutes.length > 0 || failedRootAccesses.length > 0) {
+      const errorRoots = failedRootAbsolutes
+        .map((e) => ({
+          message: "Root path not recognised as 'absolute' path",
+          root: e,
+        }))
+        .concat(
+          failedRootAccesses.map((e) => ({
+            message: "Root path not accessible",
+            root: e,
+          })),
+        );
+      errorRoots.sort((a, b) => a.root.localeCompare(b.root));
+
       return {
         state: "error",
         error: "Root paths invalid",
-        specific: failedRootAbsolutes
-          .map((e) => ({
-            message: "Root path not recognised as 'absolute' path",
-            root: e,
-          }))
-          .concat(
-            failedRootAccesses.map((e) => ({
-              message: "Root path not accessible",
-              root: e,
-            })),
-          )
-          .toSorted((a, b) => a.root.localeCompare(b.root)),
+        specific: errorRoots,
       };
+    }
 
     // find all the batches that exist under our root(s) - but with ordering across
     // all the roots
@@ -163,12 +173,13 @@ export class Loader {
 
     // if we found any base errors we need to abort
     if (errorEntries.length > 0) {
+      const specific = Array.from(errorEntries);
+      specific.sort((a, b) => a.message.localeCompare(b.message));
+
       return {
         state: "error",
         error: "Artifacts",
-        specific: errorEntries.toSorted((a, b) =>
-          a.message.localeCompare(b.message),
-        ),
+        specific: specific,
       };
     }
 
@@ -463,12 +474,12 @@ export class Loader {
       let foundConsent: any;
       let i = files.length;
       while (i--) {
-        const cp = await (files[i].artifact.getContentAsConsentpacket());
+        const cp = await files[i].artifact.getContentAsConsentpacket();
         if (cp) {
           // we don't want to have to try to come up with our own merging logic
           if (foundConsent) {
             throw new Error(
-                "Only one consentpacket can be applied at any level (family, individual, biosample)",
+              "Only one consentpacket can be applied at any level (family, individual, biosample)",
             );
           }
 
@@ -498,9 +509,11 @@ export class Loader {
       // to explicitly check in another special set
       if (structure.deleted.has(name)) continue;
 
-      const pp = await a.getContentAsPhenopacket();
+      // we will do an instanceof check to determine what type of phenopacket is returned
+      const pp: any = await a.getContentAsPhenopacket();
 
-      // we only want to process actual phenopackets
+      // we only want to process actual phenopackets - any artifact processed that does *not*
+      // match a schema will return null
       if (!pp) continue;
 
       // NOTE: we will be making JSON copies of the phenopacket and then

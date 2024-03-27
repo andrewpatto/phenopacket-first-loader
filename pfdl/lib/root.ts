@@ -1,6 +1,6 @@
 import { isAbsolute, join } from "node:path";
-import { readdir, access } from "fs/promises";
-import { Batch } from "./batch.ts";
+import { readdir, access } from "node:fs/promises";
+import { Batch } from "./batch";
 
 export class Root {
   private _batches?: Batch[] = undefined;
@@ -29,14 +29,17 @@ export class Root {
     if (this._batches)
       return this._batches;
 
+    // find all the directories
     const subs = (
       await readdir(this.absoluteRootFolder, { withFileTypes: true })
     )
-      .filter((d) => d.isDirectory())
-      .toSorted((d1, d2) => d1.name.localeCompare(d2.name))
-      .map((d) => new Batch(this, d.name))
+      .filter((d) => d.isDirectory());
 
-    this._batches = subs;
+    // we require them to be ordered for consistency of results
+    subs.sort((d1, d2) => d1.name.localeCompare(d2.name));
+
+    // turn them into Batch objects
+    this._batches = subs.map((d) => new Batch(this, d.name));
 
     return this._batches;
   }

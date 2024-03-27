@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import { Root } from "./root";
-import { Dirent } from "fs";
+import { Dirent } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {Artifact, FilesystemArtifact} from "./artifact";

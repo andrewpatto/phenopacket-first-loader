@@ -1,5 +1,9 @@
 /*eslint-disable block-scoped-var, id-length, no-control-regex, no-magic-numbers, no-prototype-builtins, no-redeclare, no-shadow, no-var, sort-vars*/
-import * as $protobuf from "protobufjs/minimal";
+import { default  as $protobuf } from "protobufjs/minimal";
+// NOTE we have imported default here - different to the js as exported from protobufjs
+// I presume we just have to rebuild this in ESM mode or something - which is something we can worry
+// about next time the phenopackets schema changes
+
 
 // Common aliases
 const $Reader = $protobuf.Reader,

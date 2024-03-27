@@ -1,7 +1,7 @@
-import { expect, test } from "bun:test";
-import { Loader } from "../lib/loader.ts";
+import { Loader } from "../lib/pfdl";
 import { resolve, join } from "node:path";
-import { ErrorReport } from "../lib/common-types.ts";
+import { ErrorReport } from "../lib/common-types";
+import 'jest-extended';
 
 const examplesFolder = resolve("..", "examples");
 const examplesBadFolder = resolve("..", "examples-bad");
@@ -14,18 +14,18 @@ test("basic end to end with printing of error messages if found", async () => {
   const structure = await l.checkStructure();
 
   if (structure.state !== "data") {
-    expect(structure.state).fail(JSON.stringify(structure, null, 2));
+    fail(JSON.stringify(structure, null, 2));
   } else {
     const r = await l.checkPhenopacketStructure(structure);
 
     if (r) {
-      expect(r).fail(JSON.stringify(r, null, 2));
+      fail(JSON.stringify(r, null, 2))
     }
 
     const f = await l.checkPhenopackets(structure);
 
     if (f.state !== "data") {
-      expect(f.state).fail(JSON.stringify(f, null, 2));
+      fail(JSON.stringify(f, null, 2));
     }
   }
 });
