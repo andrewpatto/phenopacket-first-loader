@@ -32,6 +32,8 @@
     "clean": true
   },
   "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
     "setupFilesAfterEnv": [
       "jest-extended/all"
     ]
@@ -40,9 +42,10 @@
     "preinstall": "npx only-allow pnpm",
     "build": "tsup-node",
     "dev": "tsup-node --watch",
-    "test": "jest"
+    "test": "jest --timeout 20000"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.540.0",
     "commander": "12.0.0",
     "lodash": "4.17.21",
     "protobufjs": "7.2.6",

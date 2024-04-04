@@ -1,8 +1,8 @@
 import { isAbsolute } from "node:path";
 import { readdir } from "node:fs/promises";
-import { Batch, BatchArtifactsReport, BatchStructureData } from "./batch";
-import { Root } from "./root";
-import { Artifact } from "./artifact";
+import { PfdlBatch, BatchDirent } from "./pfdl-batch";
+import { PfdlRoot } from "./pfdl-root";
+import { PfdlArtifact } from "./pfdl-artifact";
 import { ErrorReport, ErrorSpecific } from "./common-types";
 import { org } from "./filetypes/phenopackets/phenopackets";
 import {
@@ -12,12 +12,22 @@ import {
   PfdlIndividual,
   PfdlPhenopacket,
 } from "./dataset-types";
+import { RootFactory } from "./root/root-factory";
+import { PfdlError } from "./pfdl-errors";
+import {
+  mergeRootBatchesInOrderedGroups,
+  PfdlInternalBatchGroup,
+} from "./pfdl-internal-batch-group";
+import { isEqual } from "lodash";
+import { PfdlInternalArtifactIdentical } from "./pfdl-internal-artifact-identical";
+import { PfdlArtifactHistory } from "./pfdl-artifact-history";
 
 type LoaderStructureReport = {
   state: "data";
 
-  // a map of all artifacts in the loader
-  artifacts: Map<string, Artifact[]>;
+  // a map of all artifacts in the loader via artifact name
+  // and including the full history of each
+  artifacts: Map<string, PfdlArtifactHistory>;
 
   // the key names of any artifacts which have been marked as
   // deleted (they will still appear in the artifacts map)
@@ -38,60 +48,6 @@ export class Loader {
   constructor(private _absoluteRootFolders: string[]) {}
 
   /**
-   * From the given roots, find all batches and sort them across *all* roots
-   *
-   * @param roots A sequence of roots whose order is irrelevant as the result is always sorted by batch name
-   * @returns
-   */
-  private async findBatchesInOrder(
-    roots: Root[],
-  ): Promise<Map<string, Batch> | ErrorSpecific[]> {
-    const allNamesUnordered = new Map<string, Batch>();
-
-    const errors: ErrorSpecific[] = [];
-
-    // need to collect the batch names across all the roots
-    // checking for duplicates
-    // and then later we will sort/insert them into a map
-    for (const r of roots) {
-      for (const b of await r.batches()) {
-        if (allNamesUnordered.has(b.name)) {
-          errors.push({
-            message: "Batch name has occurred in another root",
-            root: r.root,
-            batch: b.name,
-          });
-          errors.push({
-            message: "Batch name has occurred in another root",
-            root: allNamesUnordered.get(b.name)?.root?.root,
-            batch: allNamesUnordered.get(b.name)?.name,
-          });
-        } else {
-          allNamesUnordered.set(b.name, b);
-        }
-      }
-    }
-
-    if (errors.length > 0) return errors;
-
-    // the javascript Map iterates keys in *insertion* order - but we would like the
-    // iteration order to be meaningful to the clients
-
-    // so we want to insert these alphabetically as our ordering
-    // definition is alphabetically (i.e. batch "2010-01" needs to come before "2011-05")
-    const map = new Map<string, Batch>();
-
-    const batchNames = Array.from(allNamesUnordered.keys());
-    batchNames.sort();
-
-    for (const a of batchNames) {
-      map.set(a, allNamesUnordered.get(a)!);
-    }
-
-    return map;
-  }
-
-  /**
    * Checks the file layout/structure of the proposed dataset and
    * returns either details of all the structure, or an error
    * structure with details of where the layout is wrong.
@@ -108,6 +64,9 @@ export class Loader {
     // all the input roots need to be recognised as absolute paths
     // this is also the first chance we have to even check if the Root folders exist
     for (const r of this._absoluteRootFolders) {
+      // TODO: add an existence check for S3 roots
+      if (r.startsWith("s3://")) continue;
+
       if (!isAbsolute(r)) {
         failedRootAbsolutes.push(r);
       } else {
@@ -141,84 +100,144 @@ export class Loader {
       };
     }
 
-    // find all the batches that exist under our root(s) - but with ordering across
-    // all the roots
-    // we are going to process them in order so that "later" batches will be able override
-    // artifacts in older batches
-    const batches = await this.findBatchesInOrder(
-      this._absoluteRootFolders.map((arf) => new Root(arf)),
+    // create all the Root objects - with a factory that knows how to create different
+    // flavours (S3 v Posix)
+    // the root objects will then be responsible for creating subsequent objects with
+    // matching types i.e. S3Root -> S3Batch
+    const roots = this._absoluteRootFolders.map((arf) =>
+      RootFactory.CreateRoot(arf),
     );
 
-    if (!(batches instanceof Map)) {
-      return {
-        state: "error",
-        error: "Artifacts",
-        specific: batches,
-      };
-    }
+    // find all the batches that exist under our root(s) - but with ordering across
+    // all the roots.
+    // we are going to process them in order so that "later" batches will be able to override
+    // artifacts in older batches
+    const batchGroups = await mergeRootBatchesInOrderedGroups(roots);
 
-    // now construct all the corresponding directory entries
-    const dataBatchEntries = new Map<Batch, BatchArtifactsReport>();
-    const errorEntries: ErrorSpecific[] = [];
+    // for every group fill in the list of files we discover inside the batch
+    {
+      // rather than abort on the first error we find - we want to process all the
+      // batches and collate error messages - then throw an exception
+      const errorEntries: ErrorSpecific[] = [];
 
-    for (const [_, b] of batches.entries()) {
-      const a = await b.findArtifacts();
+      for (const [_, group] of batchGroups) {
+        try {
+          for (const batch of group.batches) {
+            group.batchDirEnts.set(batch, await batch.loadAndCheckEntries());
+          }
+        } catch (e) {
+          if (e instanceof PfdlError) errorEntries.push(...e.specifics);
+          else throw e;
+        }
+      }
 
-      if (a.state === "error") {
-        errorEntries.push(...a.specific);
-      } else {
-        dataBatchEntries.set(b, a);
+      // if we found any base errors we need to abort
+      if (errorEntries.length > 0) {
+        const specific = Array.from(errorEntries);
+        specific.sort((a, b) => a.message.localeCompare(b.message));
+
+        return {
+          state: "error",
+          error: "Loading entries",
+          specific: specific,
+        };
       }
     }
 
-    // if we found any base errors we need to abort
-    if (errorEntries.length > 0) {
-      const specific = Array.from(errorEntries);
-      specific.sort((a, b) => a.message.localeCompare(b.message));
+    // for every group now load the manifest and check that all the manifests for grouped batches are identical
+    // (batches are only allowed to have the same name if they are identical across roots)
+    {
+      const errorManifests: ErrorSpecific[] = [];
 
-      return {
-        state: "error",
-        error: "Artifacts",
-        specific: specific,
-      };
-    }
+      for (const [_, group] of batchGroups) {
+        let firstManifest: Record<string, string> | undefined = undefined;
+        let firstBatch: PfdlBatch | undefined = undefined;
+        try {
+          for (const batch of group.batches) {
+            // no matter what we *always* need to load the manifest for every batch
+            const batchManifest = await batch.loadAndCheckManifest(
+              group.batchDirEnts.get(batch)!,
+            );
 
-    // now compare manifests to content
-    const dataBatchArtifacts = new Map<Batch, BatchStructureData>();
-    const errorArtifacts: ErrorSpecific[] = [];
+            if (!firstManifest) {
+              firstManifest = batchManifest;
+              firstBatch = batch;
+            } else {
+              if (!isEqual(batchManifest, firstManifest)) {
+                // we create two errors - one for each batch entry that has clashed here
+                // TODO: add details of where the manifest is different to the errors
+                errorManifests.push({
+                  message:
+                    "Batch name is common between two roots, but the manifest in the batches is different",
+                  root: firstBatch!.root.root,
+                  batch: firstBatch!.name,
+                });
+                errorManifests.push({
+                  message:
+                    "Batch name is common between two roots, but the manifest in the batches is different",
+                  root: batch!.root.root,
+                  batch: batch!.name,
+                });
+              }
+            }
+          }
 
-    for (const [b, a] of dataBatchEntries) {
-      const report = await b.checkManifests(a);
+          if (!firstManifest) throw new Error("Missing manifest");
 
-      if (report.state === "error") errorArtifacts.push(...report.specific);
-      else dataBatchArtifacts.set(b, report);
-    }
+          group.manifest = firstManifest;
+        } catch (e) {
+          if (e instanceof PfdlError) errorManifests.push(...e.specifics);
+          else throw e;
+        }
+      }
 
-    if (errorArtifacts.length > 0) {
-      return {
-        state: "error",
-        error: "Artifacts",
-        specific: errorArtifacts,
-      };
+      if (errorManifests.length > 0) {
+        return {
+          state: "error",
+          error: "Loading manifests",
+          specific: errorManifests,
+        };
+      }
     }
 
     // at this point we now have all the artifacts of each batch - maintaining
     // still the order of batches in our maps though
     // we now want to make a map keyed by artifact name - and layering in our
     // deletion/update logic
-    const artifacts = new Map<string, Artifact[]>();
+    const artifacts = new Map<string, PfdlArtifactHistory>();
 
-    for (const [batch, batchArtifacts] of dataBatchArtifacts) {
-      for (const a of batchArtifacts.artifacts) {
+    // linearly through each unique batch name
+    // e.g. "2020-01", "2020-05"
+    for (const [batch, group] of batchGroups) {
+      // going through the artifact names in the batch group (noting that every batch in the group
+      // is guaranteed to have exactly the same artifact names!) - these batch groups are essentially
+      // identical - just located in different clouds
+      for (const [manifestArtifactName, manifestMd5] of Object.entries(
+        group.manifest,
+      )) {
+        // create all the actual artifact entries (this may trigger content loads for small objects)
+        const loadedArtifactGroup: PfdlInternalArtifactIdentical = {
+          artifacts: await Promise.all(
+            group.batches.map((b) =>
+              b.loadAndCheckArtifact(manifestArtifactName, manifestMd5),
+            ),
+          ),
+        };
+
         // if we have seen this before in a previous batch then we are update/deleting
-        if (artifacts.has(a.name)) {
+        if (artifacts.has(manifestArtifactName)) {
           // we are processing batches from earlier -> latest, but the semantics
           // of updating are that we want the "latest" item to appear first
-          artifacts.get(a.name)?.unshift(a);
+          artifacts
+            .get(manifestArtifactName)
+            ?.reverseSortedByBatchName.unshift(loadedArtifactGroup);
         } else {
-          // this is the first time we've seen this object - lets create the record
-          // with a single entry
-          artifacts.set(a.name, [a]);
+          // this is the first time we've seen this artifact name - lets create the history record
+          // with a single entry - but first we need to actually make the artifacts
+
+          artifacts.set(manifestArtifactName, {
+            reverseSortedByBatchName: [loadedArtifactGroup],
+          });
         }
       }
     }
@@ -253,7 +272,8 @@ export class Loader {
     const usedArtifacts = new Set<string>();
 
     for (const [name, historyOfArtifacts] of structure.artifacts) {
-      const artifact = historyOfArtifacts[0];
+      const artifactGroup = historyOfArtifacts.reverseSortedByBatchName[0];
+      const artifact = artifactGroup.artifacts[0];
 
       // an artifact can still be listed even after it is deleted... so we need
       // to explicitly check in another special set
@@ -302,7 +322,7 @@ export class Loader {
             batch: artifact.batch.name,
             artifact: artifact.name,
             message:
-              "Family Phenopacket must have an id representing the identifier of the family as a group",
+              "Family Phenopacket must have an id representing the identifier of the family as a batchArtifacts",
           });
           continue;
         }
@@ -396,7 +416,8 @@ export class Loader {
     // because any above errors will cause spurious messages here)
     if (errorEntries.length === 0) {
       for (const [name, historyOfArtifacts] of structure.artifacts) {
-        const artifact = historyOfArtifacts[0];
+        const artifactGroup = historyOfArtifacts.reverseSortedByBatchName[0];
+        const artifact = artifactGroup.artifacts[0];
 
         // an artifact can still be listed even after it is deleted... so we need
         // to explicitly check in another special set
@@ -430,6 +451,18 @@ export class Loader {
     const families: PfdlFamily[] = [];
     const individuals: PfdlIndividual[] = [];
 
+    // we sometimes need to use a representative Artifact - navigating our
+    // histories and the fact that artifacts can span multiple roots. This just
+    // puts the very simple logic in one spot (we pick the first!)
+    const getRepresentativeArtifact = (artifactName: string): PfdlArtifact => {
+      const artifactHistory = structure.artifacts.get(artifactName);
+      if (!artifactHistory)
+        throw new Error(`Artifact ${artifactName} is not known`);
+
+      // it should not be possible for there to be histories or identicals with less than 1 entry
+      return artifactHistory.reverseSortedByBatchName[0].artifacts[0];
+    };
+
     const inplaceConvertFile = (f: PfdlFile) => {
       // the object we get passed in will be the original phenopacket IFile (even though the
       // type says otherwise)
@@ -450,8 +483,31 @@ export class Loader {
 
       delete origFile.uri;
 
+      const artifactHistory = structure.artifacts.get(fileName)!;
+      const artifactFirst = artifactHistory.reverseSortedByBatchName[0];
+
+      // artifacts are identical - but differing cloud services can provide different checksums
+      // so we want to merge all the checksums we know
+      const mergedChecksums: Record<string, string> = {};
+
+      for (const a of artifactFirst.artifacts) {
+        for (const [c, cValue] of Object.entries(a.getChecksums())) {
+          if (mergedChecksums[c] && mergedChecksums[c] != cValue)
+            throw new Error(
+              `Found an artifact '${fileName}' that was meant to be identical but differed in checksum ${c} - ${mergedChecksums[c]} v ${cValue}`,
+            );
+          mergedChecksums[c] = cValue;
+        }
+      }
+
       f.name = fileName;
-      f.artifact = structure.artifacts.get(fileName!)![0];
+      f.artifacts = {
+        uris: artifactHistory.reverseSortedByBatchName[0].artifacts.map(
+          (a) => a.uri,
+        ),
+        size: artifactHistory.reverseSortedByBatchName[0].artifacts[0].size,
+        checksums: mergedChecksums,
+      };
     };
 
     const inplaceConvertPhenopacket = (p: PfdlPhenopacket) => {
@@ -474,7 +530,9 @@ export class Loader {
       let foundConsent: any;
       let i = files.length;
       while (i--) {
-        const cp = await files[i].artifact.getContentAsConsentpacket();
+        const cp = await getRepresentativeArtifact(
+          files[i].name,
+        ).getContentAsConsentpacket();
         if (cp) {
           // we don't want to have to try to come up with our own merging logic
           if (foundConsent) {
@@ -503,14 +561,15 @@ export class Loader {
     };
 
     for (const [name, historyOfArtifacts] of structure.artifacts) {
-      const a = historyOfArtifacts[0];
+      const artifactGroup = historyOfArtifacts.reverseSortedByBatchName[0];
+      const artifact = artifactGroup.artifacts[0];
 
       // an artifact can still be listed even after it is deleted... so we need
       // to explicitly check in another special set
       if (structure.deleted.has(name)) continue;
 
       // we will do an instanceof check to determine what type of phenopacket is returned
-      const pp: any = await a.getContentAsPhenopacket();
+      const pp: any = await artifact.getContentAsPhenopacket();
 
       // we only want to process actual phenopackets - any artifact processed that does *not*
       // match a schema will return null

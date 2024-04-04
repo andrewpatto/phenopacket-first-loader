@@ -128,3 +128,6 @@ dist
 .yarn/install-state.gz
 .pnp.*
 /.idea/
+
+# Mac
+.DS_Store
